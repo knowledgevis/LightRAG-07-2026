@@ -1,6 +1,13 @@
 """
 ArangoDB implementation for LightRAG
+
+made the following changes, assisted by codex, to match 07-26-2026 checkout of lightRAG:
+had to add implementations of abstract functions get_doc_by_status, get_doc_by_file_basename, and get_doc_by_content_hash to match the interface of BaseKVStorage
+had to fix get_docs_paginated to use status_filter argument
+fixed get_docs_by_track_id() to match returned result from examples in mongo/json implementations
 """
+
+
 
 import os
 import re
@@ -395,18 +402,20 @@ class ArangoDBStorage(BaseGraphStorage):
             logger.error(f"Error upserting edge: {e}")
             raise
     
-    async def get_knowledge_graph(self, node_label: str, max_depth: int = 5):
+    async def get_knowledge_graph(
+        self, node_label: str, max_depth: int = 3, max_nodes: int = 1000
+    ):
         try:
             from ..types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
             result = KnowledgeGraph()
             
             if node_label == "*":
                 aql = f"""
-                LET nodes = (FOR node IN {self.nodes_name} LIMIT 1000 RETURN node)
-                LET edges = (FOR edge IN {self.edges_name} RETURN edge)
+                LET nodes = (FOR node IN {self.nodes_name} LIMIT @max_nodes RETURN node)
+                LET edges = (FOR edge IN {self.edges_name} LIMIT @max_nodes RETURN edge)
                 RETURN {{nodes: nodes, edges: edges}}
                 """
-                cursor = self.db.aql.execute(aql)
+                cursor = self.db.aql.execute(aql, bind_vars={"max_nodes": max_nodes})
             else:
                 clean_label = node_label.strip('"')
                 aql = f"""
@@ -414,10 +423,15 @@ class ArangoDBStorage(BaseGraphStorage):
                     FILTER start.label LIKE @pattern
                     FOR v, e, p IN 0..@depth ANY start {self.edges_name}
                         RETURN DISTINCT {{node: v, edge: e}}
+                LIMIT @max_nodes
                 """
                 cursor = self.db.aql.execute(
                     aql,
-                    bind_vars={"pattern": f"%{clean_label}%", "depth": max_depth}
+                    bind_vars={
+                        "pattern": f"%{clean_label}%",
+                        "depth": max_depth,
+                        "max_nodes": max_nodes,
+                    }
                 )
             
             seen_nodes = set()
@@ -1552,47 +1566,60 @@ class ArangoDBDocStatusStorage(DocStatusStorage):
         return clean_key
     
     async def get_docs_by_status(self, status: DocStatus) -> dict[str, DocProcessingStatus]:
-        """Get all document IDs with a specific status"""
-        try:
-            # Handle both DocStatus enum and string
-            status_value = status.value if hasattr(status, 'value') else status
-            
-            aql = f"""
-            FOR doc IN {self.status_name}
-                FILTER doc.status == @status
-                RETURN doc
-            """
-            cursor = self.db.aql.execute(aql, bind_vars={"status": status_value})
-            result = {}
-            for doc in cursor:
-                try:
-                    doc_id = doc.get("doc_id")
-                    if doc_id:
-                        # Create DocProcessingStatus from the metadata
-                        metadata = doc.get("metadata", {})
-                        
-                        # Remove fields that aren't part of DocProcessingStatus
-                        metadata.pop('content', None)
-                        
-                        # Ensure required fields are present
-                        if "status" not in metadata:
-                            metadata["status"] = doc.get("status", status_value)
-                        
-                        # Ensure file_path is present (required field)
-                        if "file_path" not in metadata:
-                            metadata["file_path"] = metadata.get("source", doc_id)  # Use source or doc_id as fallback
-                        
-                        result[doc_id] = DocProcessingStatus(**metadata)
-                except Exception as e:
-                    logger.error(f"Error creating DocProcessingStatus for {doc.get('doc_id')}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-            return result
-        except Exception as e:
-            logger.error(f"Error getting docs by status: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+        """Get all documents with a specific status."""
+        return await self.get_docs_by_statuses([status])
+
+    async def get_docs_by_statuses(
+        self, statuses: list[DocStatus], strict: bool = False
+    ) -> dict[str, DocProcessingStatus]:
+        """Get all documents matching any of the given statuses in one query.
+
+        Transport/query errors are allowed to propagate so strict callers get a
+        complete-or-raise contract. In relaxed mode, malformed rows are logged
+        and skipped.
+        """
+        if not statuses:
             return {}
+
+        status_values = [s.value if hasattr(s, "value") else s for s in statuses]
+        aql = f"""
+        FOR doc IN {self.status_name}
+            FILTER doc.status IN @statuses
+            RETURN doc
+        """
+
+        cursor = self.db.aql.execute(aql, bind_vars={"statuses": status_values})
+        result: dict[str, DocProcessingStatus] = {}
+        for doc in cursor:
+            try:
+                doc_id = doc.get("doc_id")
+                if not doc_id:
+                    raise KeyError("doc_id")
+
+                data = doc.get("metadata", {})
+                if not isinstance(data, dict):
+                    raise TypeError("metadata must be a dict")
+
+                data = data.copy()
+                data.pop("content", None)
+                if not data.get("file_path"):
+                    data["file_path"] = "no-file-path"
+                if "metadata" not in data:
+                    data["metadata"] = {}
+                if "error_msg" not in data:
+                    data["error_msg"] = None
+                if "status" not in data:
+                    data["status"] = doc.get("status")
+
+                result[doc_id] = DocProcessingStatus(**data)
+            except (KeyError, TypeError) as e:
+                logger.error(
+                    f"[{self.workspace}] Missing required field for document {doc.get('doc_id')}: {e}"
+                )
+                if strict:
+                    raise
+                continue
+        return result
     
     async def upsert_doc_status(self, doc_id: str, status: str, metadata: Dict[str, Any] = None) -> None:
         """Update or insert document status"""
@@ -1745,9 +1772,69 @@ class ArangoDBDocStatusStorage(DocStatusStorage):
         except Exception as e:
             logger.error(f"Error getting doc by file path: {e}")
             return None
+
+    async def get_doc_by_file_basename(
+        self, basename: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Find an existing record whose canonical basename matches exactly."""
+        if not basename:
+            return None
+        if basename == "unknown_source":
+            return None
+
+        try:
+            aql = f"""
+            FOR doc IN {self.status_name}
+                FILTER doc.metadata.file_path == @basename
+                LIMIT 1
+                RETURN doc
+            """
+            cursor = self.db.aql.execute(aql, bind_vars={"basename": basename})
+            doc = next(cursor, None)
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error in get_doc_by_file_basename: {e}")
+            return None
+
+        if not doc:
+            return None
+        doc_id = doc.get("doc_id")
+        if doc_id is None:
+            return None
+        return str(doc_id), doc
+
+    async def get_doc_by_content_hash(
+        self, content_hash: str
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Find an existing record whose content_hash field matches."""
+        if not content_hash:
+            return None
+
+        try:
+            aql = f"""
+            FOR doc IN {self.status_name}
+                FILTER doc.metadata.content_hash == @content_hash
+                LIMIT 1
+                RETURN doc
+            """
+            cursor = self.db.aql.execute(
+                aql, bind_vars={"content_hash": content_hash}
+            )
+            doc = next(cursor, None)
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error in get_doc_by_content_hash: {e}")
+            return None
+
+        if not doc:
+            return None
+        doc_id = doc.get("doc_id")
+        if doc_id is None:
+            return None
+        return str(doc_id), doc
     
-    async def get_docs_by_track_id(self, track_id: str) -> List[Dict[str, Any]]:
-        """Get all documents with a specific track_id"""
+    async def get_docs_by_track_id(
+        self, track_id: str
+    ) -> dict[str, DocProcessingStatus]:
+        """Get all documents with a specific track_id."""
         try:
             aql = f"""
             FOR doc IN {self.status_name}
@@ -1755,68 +1842,129 @@ class ArangoDBDocStatusStorage(DocStatusStorage):
                 RETURN doc
             """
             cursor = self.db.aql.execute(aql, bind_vars={"track_id": track_id})
-            
-            results = []
+
+            result: dict[str, DocProcessingStatus] = {}
             for doc in cursor:
-                doc.pop("_id", None)
-                doc.pop("_key", None)
-                doc.pop("_rev", None)
-                results.append(doc)
-            return results
+                try:
+                    doc_id = doc.get("doc_id")
+                    if not doc_id:
+                        raise KeyError("doc_id")
+
+                    data = doc.get("metadata", {})
+                    if not isinstance(data, dict):
+                        raise TypeError("metadata must be a dict")
+
+                    data = data.copy()
+                    data.pop("content", None)
+                    if not data.get("file_path"):
+                        data["file_path"] = "no-file-path"
+                    if "metadata" not in data:
+                        data["metadata"] = {}
+                    if "error_msg" not in data:
+                        data["error_msg"] = None
+                    if "status" not in data:
+                        data["status"] = doc.get("status")
+
+                    result[doc_id] = DocProcessingStatus(**data)
+                except (KeyError, TypeError) as e:
+                    logger.error(
+                        f"[{self.workspace}] Missing required field for document {doc.get('doc_id')}: {e}"
+                    )
+                    continue
+
+            return result
         except Exception as e:
             logger.error(f"Error getting docs by track_id: {e}")
-            return []
+            return {}
     
     async def get_docs_paginated(
-        self, 
-        offset: int = 0, 
-        limit: int = 100, 
-        status: Optional[str] = None
-    ) -> Tuple[List[Dict[str, Any]], int]:
-        """Get documents with pagination"""
+        self,
+        status_filter: DocStatus | None = None,
+        status_filters: list[DocStatus] | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        sort_field: str = "updated_at",
+        sort_direction: str = "desc",
+    ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
+        """Get documents with pagination support."""
+        status_filter_values = self.resolve_status_filter_values(
+            status_filter=status_filter,
+            status_filters=status_filters,
+        )
+
+        if page < 1:
+            page = 1
+        if page_size < 10:
+            page_size = 10
+        elif page_size > 200:
+            page_size = 200
+
+        if sort_field not in ["created_at", "updated_at", "id", "file_path"]:
+            sort_field = "updated_at"
+
+        if sort_direction.lower() not in ["asc", "desc"]:
+            sort_direction = "desc"
+
         try:
-            # Build query with optional status filter
-            if status:
+            if status_filter_values is not None:
                 aql = f"""
-                LET total = LENGTH(
-                    FOR doc IN {self.status_name}
-                        FILTER doc.status == @status
-                        RETURN 1
-                )
-                LET docs = (
-                    FOR doc IN {self.status_name}
-                        FILTER doc.status == @status
-                        SORT doc.updated_at DESC
-                        LIMIT @offset, @limit
-                        RETURN doc
-                )
-                RETURN {{docs: docs, total: total}}
+                FOR doc IN {self.status_name}
+                    FILTER doc.status IN @statuses
+                    RETURN doc
                 """
-                bind_vars = {"status": status, "offset": offset, "limit": limit}
+                bind_vars = {"statuses": sorted(status_filter_values)}
             else:
                 aql = f"""
-                LET total = LENGTH(FOR doc IN {self.status_name} RETURN 1)
-                LET docs = (
-                    FOR doc IN {self.status_name}
-                        SORT doc.updated_at DESC
-                        LIMIT @offset, @limit
-                        RETURN doc
-                )
-                RETURN {{docs: docs, total: total}}
+                FOR doc IN {self.status_name}
+                    RETURN doc
                 """
-                bind_vars = {"offset": offset, "limit": limit}
-            
+                bind_vars = {}
+
             cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
-            result = next(cursor, {"docs": [], "total": 0})
-            
-            docs = []
-            for doc in result.get("docs", []):
-                doc.pop("_id", None)
-                doc.pop("_key", None)
-                doc.pop("_rev", None)
-                docs.append(doc)
-            
-            return docs, result.get("total", 0)
+
+            all_docs: list[tuple[str, DocProcessingStatus]] = []
+            for doc in cursor:
+                try:
+                    doc_id = doc.get("doc_id")
+                    if not doc_id:
+                        raise KeyError("doc_id")
+
+                    data = doc.get("metadata", {})
+                    if not isinstance(data, dict):
+                        raise TypeError("metadata must be a dict")
+
+                    data = data.copy()
+                    data.pop("content", None)
+                    if not data.get("file_path"):
+                        data["file_path"] = "no-file-path"
+                    if "metadata" not in data:
+                        data["metadata"] = {}
+                    if "error_msg" not in data:
+                        data["error_msg"] = None
+                    if "status" not in data:
+                        data["status"] = doc.get("status")
+
+                    all_docs.append((doc_id, DocProcessingStatus(**data)))
+                except (KeyError, TypeError) as e:
+                    logger.error(
+                        f"[{self.workspace}] Missing required field for document {doc.get('doc_id')}: {e}"
+                    )
+                    continue
+
+            reverse_sort = sort_direction.lower() == "desc"
+            if sort_field == "id":
+                all_docs.sort(key=lambda x: x[0], reverse=reverse_sort)
+            else:
+                all_docs.sort(
+                    key=lambda x: getattr(x[1], sort_field, "") or "",
+                    reverse=reverse_sort,
+                )
+
+            total_count = len(all_docs)
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            return all_docs[start_idx:end_idx], total_count
+
         except Exception as e:
             logger.error(f"Error getting paginated docs: {e}")
             return [], 0
