@@ -1,3 +1,4 @@
+
 STORAGE_IMPLEMENTATIONS = {
     "KV_STORAGE": {
         "implementations": [
@@ -6,6 +7,7 @@ STORAGE_IMPLEMENTATIONS = {
             "PGKVStorage",
             "MongoKVStorage",
             "OpenSearchKVStorage",
+            "ArangoDBKVStorage",
         ],
         "required_methods": ["get_by_id", "upsert"],
     },
@@ -17,6 +19,7 @@ STORAGE_IMPLEMENTATIONS = {
             "MongoGraphStorage",
             "MemgraphStorage",
             "OpenSearchGraphStorage",
+            "ArangoDBStorage",
         ],
         "required_methods": ["upsert_node", "upsert_edge"],
     },
@@ -29,7 +32,8 @@ STORAGE_IMPLEMENTATIONS = {
             "QdrantVectorDBStorage",
             "MongoVectorDBStorage",
             "OpenSearchVectorDBStorage",
-            # "ChromaVectorDBStorage",
+            "ArangoDBVectorStorage",
+        # "ChromaVectorDBStorage",
         ],
         "required_methods": ["query", "upsert"],
     },
@@ -40,6 +44,7 @@ STORAGE_IMPLEMENTATIONS = {
             "PGDocStatusStorage",
             "MongoDocStatusStorage",
             "OpenSearchDocStatusStorage",
+            "ArangoDBDocStatusStorage"
         ],
         "required_methods": ["get_docs_by_status"],
     },
@@ -110,6 +115,8 @@ STORAGE_ENV_REQUIREMENTS: dict[str, list[str]] = {
     ],
 }
 
+
+
 # Storage implementation module mapping
 STORAGES = {
     "NetworkXStorage": ".kg.networkx_impl",
@@ -137,6 +144,10 @@ STORAGES = {
     "OpenSearchDocStatusStorage": ".kg.opensearch_impl",
     "OpenSearchGraphStorage": ".kg.opensearch_impl",
     "OpenSearchVectorDBStorage": ".kg.opensearch_impl",
+    "ArangoDBStorage": ".kg.arangodb_impl",
+    "ArangoDBKVStorage": ".kg.arangodb_impl", 
+    "ArangoDBVectorStorage": ".kg.arangodb_impl",
+    "ArangoDBDocStatusStorage": ".kg.arangodb_impl",
 }
 
 
