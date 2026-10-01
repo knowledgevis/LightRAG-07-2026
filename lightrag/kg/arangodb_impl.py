@@ -198,6 +198,14 @@ class ArangoDBStorage(BaseGraphStorage):
             self.nodes_collection.add_hash_index(fields=["label"], unique=False)
         except:
             pass
+        try:
+            self.nodes_collection.add_persistent_index(fields=["label"])
+        except:
+            pass
+        try:
+            self.edges_collection.add_persistent_index(fields=["_from", "_to"])
+        except:
+            pass
     
     def _node_key(self, node_id: str) -> str:
         clean_id = re.sub(r'[^a-zA-Z0-9_]', '_', node_id.strip('"'))
@@ -1555,6 +1563,22 @@ class ArangoDBDocStatusStorage(DocStatusStorage):
         try:
             self.status_collection.add_hash_index(fields=["doc_id"], unique=True)
             self.status_collection.add_hash_index(fields=["status"], unique=False)
+        except:
+            pass
+        try:
+            self.status_collection.add_persistent_index(fields=["status"])
+        except:
+            pass
+        try:
+            self.status_collection.add_persistent_index(fields=["metadata.file_path"])
+        except:
+            pass
+        try:
+            self.status_collection.add_persistent_index(fields=["metadata.content_hash"])
+        except:
+            pass
+        try:
+            self.status_collection.add_persistent_index(fields=["metadata.track_id"])
         except:
             pass
     

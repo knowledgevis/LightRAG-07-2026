@@ -824,17 +824,7 @@ def create_optimized_embedding_function(
                     else bedrock_embed
                 )
                 # Pass model only if provided, let function use its default otherwise
-                kwargs = {
-                    "texts": texts,
-                    "aws_region": getattr(args, "aws_region", None),
-                    "aws_access_key_id": getattr(args, "aws_access_key_id", None),
-                    "aws_secret_access_key": getattr(
-                        args, "aws_secret_access_key", None
-                    ),
-                    "aws_session_token": getattr(args, "aws_session_token", None),
-                }
-                if host is not None:
-                    kwargs["endpoint_url"] = host
+                kwargs = {"texts": texts}
                 if model:
                     kwargs["model"] = model
                 return await actual_func(**kwargs)
@@ -1849,8 +1839,6 @@ def create_app(args):
                         prompt,
                         system_prompt=system_prompt,
                         history_messages=history_messages,
-                        endpoint_url=role_host,
-                        **bedrock_aws_options,
                         **kwargs,
                     )
 
@@ -1978,11 +1966,6 @@ def create_app(args):
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
-            endpoint_url=args.llm_binding_host,
-            aws_region=getattr(args, "aws_region", None),
-            aws_access_key_id=getattr(args, "aws_access_key_id", None),
-            aws_secret_access_key=getattr(args, "aws_secret_access_key", None),
-            aws_session_token=getattr(args, "aws_session_token", None),
             **kwargs,
         )
 

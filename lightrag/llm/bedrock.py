@@ -2,6 +2,7 @@
 # since AWS migrated to Nova 2 models.
 
 import copy
+import asyncio
 import os
 import json
 import logging
@@ -28,6 +29,9 @@ else:
     from collections.abc import AsyncIterator
 from typing import Union
 
+from botocore.config import Config
+
+
 # Import botocore exceptions for proper exception handling
 try:
     from botocore.exceptions import (
@@ -35,13 +39,11 @@ try:
         ConnectionError as BotocoreConnectionError,
         ReadTimeoutError,
     )
-    from botocore.config import Config as BotoConfig
 except ImportError:
     # If botocore is not installed, define placeholders
     ClientError = Exception
     BotocoreConnectionError = Exception
     ReadTimeoutError = Exception
-    BotoConfig = None
 
 
 class BedrockError(Exception):
@@ -58,6 +60,67 @@ class BedrockConnectionError(BedrockError):
 
 class BedrockTimeoutError(BedrockError):
     """Error for timeout issues"""
+
+
+_bedrock_embed_clients = {}
+_bedrock_embed_client_locks = {}
+
+
+class _ReusableBedrockClientContext:
+    def __init__(self, client):
+        self._client = client
+
+    async def __aenter__(self):
+        return self._client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+async def _get_bedrock_embed_client(
+    region,
+    aws_access_key_id=None,
+    aws_secret_access_key=None,
+    aws_session_token=None,
+    endpoint_url=None,
+):
+    # CRL added this config to try and avoid timeouts in interactive mode
+    client_config = Config(
+        connect_timeout=90,
+        read_timeout=240,
+        retries={"max_attempts": 0},
+    )
+    """Return a shared Bedrock client for one credential/configuration set."""
+    client_kwargs = {"region_name": region, "config": client_config}
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    session_kwargs = {
+        key: value
+        for key, value in {
+            "aws_access_key_id": aws_access_key_id,
+            "aws_secret_access_key": aws_secret_access_key,
+            "aws_session_token": aws_session_token,
+        }.items()
+        if value is not None
+    }
+    cache_key = (
+        aioboto3.Session,
+        tuple(sorted(session_kwargs.items())),
+        tuple(sorted(client_kwargs.items())),
+    )
+
+    if cache_key not in _bedrock_embed_client_locks:
+        _bedrock_embed_client_locks[cache_key] = asyncio.Lock()
+
+    async with _bedrock_embed_client_locks[cache_key]:
+        if cache_key not in _bedrock_embed_clients:
+            session = aioboto3.Session(**session_kwargs)
+            client_context = session.client("bedrock-runtime", **client_kwargs)
+            client = await client_context.__aenter__()
+            _bedrock_embed_clients[cache_key] = _ReusableBedrockClientContext(client)
+
+    return _bedrock_embed_clients[cache_key]
 
 
 def _set_env_if_present(key: str, value):
@@ -161,49 +224,16 @@ async def bedrock_complete_if_cache(
         logging.debug(
             "enable_cot=True is not supported for Bedrock and will be ignored."
         )
-    # Respect existing env; only set if a non-empty value is available
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID") or aws_access_key_id
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or aws_secret_access_key
-    session_token = os.environ.get("AWS_SESSION_TOKEN") or aws_session_token
-    _set_env_if_present("AWS_ACCESS_KEY_ID", access_key)
-    _set_env_if_present("AWS_SECRET_ACCESS_KEY", secret_key)
-    _set_env_if_present("AWS_SESSION_TOKEN", session_token)
-    # Always consume transport-level kwargs first so they are never forwarded
-    # to Bedrock Converse API calls.
-    aws_region_kwarg = kwargs.pop("aws_region", None)
-    endpoint_url_kwarg = kwargs.pop("endpoint_url", None)
-
     # Region handling: prefer env, else kwarg (optional)
-    region = os.environ.get("AWS_REGION") or aws_region_kwarg
+    region = os.environ.get("AWS_REGION") or kwargs.pop("aws_region", None)
     _set_env_if_present("AWS_REGION", region)
 
-    # Client endpoint and timeout options must be applied at client creation,
-    # not passed to converse()/converse_stream() API calls.
-    endpoint_url = (
-        os.environ.get("AWS_BEDROCK_ENDPOINT_URL")
-        or os.environ.get("BEDROCK_ENDPOINT_URL")
-        or os.environ.get("DEFAULT_BEDROCK_ENDPOINT")
-        or os.environ.get("DEFAULT_BEDROCK_EDPOINT")
-        or endpoint_url_kwarg
-    )
-    request_timeout = kwargs.pop("timeout", None)
-
-    # Normalize bare host env values like "bedrock-runtime.us-east-1.amazonaws.com".
-    if endpoint_url and not str(endpoint_url).startswith(("http://", "https://")):
-        endpoint_url = f"https://{endpoint_url}"
-
-    timeout_config = None
-    if request_timeout is not None and BotoConfig is not None:
-        try:
-            timeout_value = int(float(request_timeout))
-            timeout_config = BotoConfig(
-                connect_timeout=timeout_value,
-                read_timeout=timeout_value,
-            )
-        except (TypeError, ValueError):
-            logging.warning(
-                f"Invalid Bedrock timeout value '{request_timeout}', ignoring custom timeout"
-            )
+    # Consume legacy endpoint/timeout kwargs but intentionally ignore them.
+    # The Bedrock runtime client should use the default AWS credential chain
+    # (instance role, env, shared config, etc.) and the standard regional
+    # endpoint, matching the working boto3 example.
+    kwargs.pop("endpoint_url", None)
+    kwargs.pop("timeout", None)
     kwargs.pop("hashing_kv", None)
     # Capture stream flag (if provided) and remove from kwargs since it's not a Bedrock API parameter
     # We'll use this to determine whether to call converse_stream or converse
@@ -266,29 +296,9 @@ async def bedrock_complete_if_cache(
             nonlocal client
 
             # Create the client outside the generator to ensure it stays open
-            if endpoint_url and timeout_config is not None:
-                client = await session.client(
-                    "bedrock-runtime",
-                    region_name=region,
-                    endpoint_url=endpoint_url,
-                    config=timeout_config,
-                ).__aenter__()
-            elif endpoint_url:
-                client = await session.client(
-                    "bedrock-runtime",
-                    region_name=region,
-                    endpoint_url=endpoint_url,
-                ).__aenter__()
-            elif timeout_config is not None:
-                client = await session.client(
-                    "bedrock-runtime",
-                    region_name=region,
-                    config=timeout_config,
-                ).__aenter__()
-            else:
-                client = await session.client(
-                    "bedrock-runtime", region_name=region
-                ).__aenter__()
+            client = await session.client(
+                "bedrock-runtime", region_name=region
+            ).__aenter__()
             event_stream = None
             iteration_started = False
 
@@ -362,23 +372,7 @@ async def bedrock_complete_if_cache(
 
     # For non-streaming responses, use the standard async context manager pattern
     session = aioboto3.Session()
-    if endpoint_url and timeout_config is not None:
-        bedrock_client_ctx = session.client(
-            "bedrock-runtime",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            config=timeout_config,
-        )
-    elif endpoint_url:
-        bedrock_client_ctx = session.client(
-            "bedrock-runtime", region_name=region, endpoint_url=endpoint_url
-        )
-    elif timeout_config is not None:
-        bedrock_client_ctx = session.client(
-            "bedrock-runtime", region_name=region, config=timeout_config
-        )
-    else:
-        bedrock_client_ctx = session.client("bedrock-runtime", region_name=region)
+    bedrock_client_ctx = session.client("bedrock-runtime", region_name=region)
 
     async with bedrock_client_ctx as bedrock_async_client:
         try:
@@ -447,36 +441,20 @@ async def bedrock_embed(
     aws_region=None,
     endpoint_url=None,
 ) -> np.ndarray:
-    # Respect existing env; only set if a non-empty value is available
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID") or aws_access_key_id
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or aws_secret_access_key
-    session_token = os.environ.get("AWS_SESSION_TOKEN") or aws_session_token
     embedding_dimension = os.environ.get("EMBEDDING_DIM", 1024)
-    _set_env_if_present("AWS_ACCESS_KEY_ID", access_key)
-    _set_env_if_present("AWS_SECRET_ACCESS_KEY", secret_key)
-    _set_env_if_present("AWS_SESSION_TOKEN", session_token)
 
 
     # Region handling: prefer env; fallback to explicit argument
     region = os.environ.get("AWS_REGION") or aws_region
     _set_env_if_present("AWS_REGION", region)
 
-    # Endpoint handling: allow explicit override and optional environment fallback.
-    bedrock_endpoint_url = (
-        os.environ.get("AWS_BEDROCK_ENDPOINT_URL")
-        or os.environ.get("BEDROCK_ENDPOINT_URL")
-        or endpoint_url
+    bedrock_client_ctx = await _get_bedrock_embed_client(
+        region,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token,
+        endpoint_url=endpoint_url,
     )
-
-    session = aioboto3.Session()
-    if bedrock_endpoint_url:
-        bedrock_client_ctx = session.client(
-            "bedrock-runtime",
-            region_name=region,
-            #endpoint_url=bedrock_endpoint_url,
-        )
-    else:
-        bedrock_client_ctx = session.client("bedrock-runtime", region_name=region)
 
     async with bedrock_client_ctx as bedrock_async_client:
         try:

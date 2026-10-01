@@ -10,6 +10,7 @@ file fails the parse stage instead of silently yielding an empty document.
 from __future__ import annotations
 
 from io import BytesIO
+from typing import cast
 
 
 class LegacyExtractionError(ValueError):
@@ -36,6 +37,25 @@ def _extract_pdf_pypdf(file_bytes: bytes, password: str | None = None) -> str:
     for page in reader.pages:
         content += page.extract_text() + "\n"
     return content
+
+# added by CRL and CoPilot when pypdf failed on some PDFs, so we added a fallback to PyMuPDF
+def _extract_pdf_pymupdf(file_bytes: bytes, password: str | None = None) -> str:
+    """Extract PDF content using PyMuPDF (synchronous)."""
+    import pymupdf  # type: ignore
+
+    with pymupdf.open(stream=file_bytes, filetype="pdf") as document:
+        if document.needs_pass:
+            if not document.authenticate(password or ""):
+                if password:
+                    raise Exception("Incorrect PDF password")
+                raise Exception("PDF is encrypted but no password provided")
+
+        content = ""
+        for page in document:
+            content += cast(str, page.get_text()) + "\n"
+        return content
+
+
 
 
 def _extract_docx(file_bytes: bytes) -> str:
@@ -162,7 +182,8 @@ def _extract_xlsx(file_bytes: bytes) -> str:
 
 # Suffixes (without dot) routed to dedicated binary extractors.
 _BINARY_EXTRACTORS = {
-    "pdf": _extract_pdf_pypdf,
+    #"pdf": _extract_pdf_pypdf,
+    "pdf": _extract_pdf_pymupdf,
     "docx": _extract_docx,
     "pptx": _extract_pptx,
     "xlsx": _extract_xlsx,
@@ -198,8 +219,8 @@ def extract_text(
     """
     suffix = suffix.lower().lstrip(".")
     extractor = _BINARY_EXTRACTORS.get(suffix)
-    if extractor is _extract_pdf_pypdf:
-        return _extract_pdf_pypdf(file_bytes, pdf_password)
+    if extractor is _extract_pdf_pymupdf:
+        return _extract_pdf_pymupdf(file_bytes, pdf_password)
     if extractor is not None:
         return extractor(file_bytes)
     return _decode_text(file_bytes)

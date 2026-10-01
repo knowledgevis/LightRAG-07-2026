@@ -90,12 +90,13 @@ class SafeStreamHandler(logging.StreamHandler):
 # Initialize logger with basic configuration
 logger = logging.getLogger("lightrag")
 logger.propagate = False  # prevent log message send to root logger
+#logger.setLevel(logging.INFO)
 logger.setLevel(logging.INFO)
 
 # Add console handler if no handlers exist
 if not logger.handlers:
     console_handler = SafeStreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.WARNING)
     formatter = logging.Formatter("%(levelname)s: %(message)s")
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)

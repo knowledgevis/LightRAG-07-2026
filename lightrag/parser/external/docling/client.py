@@ -110,11 +110,11 @@ class DoclingRawClient:
             raise ValueError("DOCLING_ENDPOINT is required")
         self.engine_version = os.getenv("DOCLING_ENGINE_VERSION", "").strip()
 
-        self.do_ocr = env_bool("DOCLING_DO_OCR", True)
+        self.do_ocr = env_bool("DOCLING_DO_OCR", False)
         self.force_ocr = (
             bool(self._overrides["force_ocr"])
             if "force_ocr" in self._overrides
-            else env_bool("DOCLING_FORCE_OCR", True)
+            else env_bool("DOCLING_FORCE_OCR", False)
         )
         self.ocr_engine = os.getenv("DOCLING_OCR_ENGINE", "auto").strip() or "auto"
         self.ocr_preset = os.getenv("DOCLING_OCR_PRESET", "auto").strip() or "auto"
@@ -213,7 +213,7 @@ class DoclingRawClient:
             "pipeline": PIPELINE,
             "target_type": TARGET_TYPE,
             "image_export_mode": IMAGE_EXPORT_MODE,
-            "do_ocr": _bool_form(self.do_ocr),
+            "do_ocr": False,
             "force_ocr": _bool_form(self.force_ocr),
             "ocr_engine": self.ocr_engine,
             "ocr_preset": self.ocr_preset,

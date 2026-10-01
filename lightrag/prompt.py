@@ -15,21 +15,63 @@ PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 # Default entity type guidance injected into extraction prompts via {entity_types_guidance}.
 # Users can override this by passing entity_types_guidance in addon_params, or by
 # replacing the full prompt template string in PROMPTS.
+#PROMPTS[
+#    "default_entity_types_guidance"
+#] = """Classify each entity using one of the following types. If no type fits, use `Other`.#
+
+#- Person: Human individuals, real or fictional
+#- Creature: Non-human living beings (animals, mythical beings, etc.)
+#- Organization: Companies, institutions, government bodies, groups
+#- Location: Geographic places (cities, countries, buildings, regions)
+#- Event: Occurrences, incidents, ceremonies, meetings
+#- Concept: Abstract ideas, theories, principles, beliefs
+#- Method: Procedures, techniques, algorithms, workflows
+#- Content: Creative or informational works (books, articles, films, reports)
+#- Data: Quantitative or structured information (statistics, datasets, measurements)
+#- Artifact: Physical or digital objects created by humans (tools, software, devices)
+#- NaturalObject: Natural non-living objects (minerals, celestial bodies, chemical compounds)"""
+
+# over-write the default entity type guidance with organoid-specific guidance
+
 PROMPTS[
     "default_entity_types_guidance"
-] = """Classify each entity using one of the following types. If no type fits, use `Other`.
+] = """Classify each entity using one of the following types. If no type fits, use `Other`. 
+  Do not extract people names, locations, or organizations. Do not extract entities that are not relevant to the biomedical domain. 
+  Do not extract abbreviated names (e.g. A. Y., Y. N., etc.).
+  Do not extract single letters (e.g. A, B, C, etc.) or single numbers (e.g. 1, 2, 3, etc.).
+  Do not extract single first or last names (e.g. Lancaster, Johnson, Hanna, Cohen, John, etc.)
+  Do not extract names with last name first followed by a comma and an initial (e.g. Smith, J., Johnson, A., etc.)
+  Do not extract names with a first initial followed by a last name (e.g. J. Smith, A. Johnson, etc.)
+  If an entity is a subclass of another entity type, use the more specific type. For example, if an entity is a specific type of cell, classify it as `Cell` rather than `Organ`. 
+  If an entity is a specific type of disease, classify it as `Disease` rather than `Concept`. 
+  If an entity is a specific type of chemical, classify it as `Chemical` rather than `NaturalObject`. 
+  If an entity is a specific type of method, classify it as `Method` rather than `Concept`. 
+  If an entity is a specific type of data, classify it as `Data` rather than `Concept`. 
+  If an entity is a specific type of artifact, classify it as `Artifact` rather than `Concept`. 
+  If an entity is a specific type of event, classify it as `Event` rather than `Concept`. 
+  If an entity is a specific type of reagent, classify it as `Reagent` rather than `Chemical`. 
+  If an entity is a specific type of equipment, classify it as `Equipment` rather than `Artifact`.
+  
+  
+  - Animal: Non-human living beings (animals, mie, monkeys, etc.)
+  - Organoid: Miniaturized and simplified versions of organs produced in vitro
+  - Spheroid: 3D cell culture models that mimic the structure and function of tissues
+  - Organ: Biological organs
+  - Equipment: Tools and instruments
+  - Cell: Basic biological units
+  - Chemical: Chemical substances
+  - Reagent: Laboratory reagents
+  - Disease: Medical conditions
+  - Creature: Non-human living beings (animals, etc.)
+  - Event: Occurrences, incidents, biological processes, or phenomena
+  - Concept: Abstract ideas, theories, principles, beliefs
+  - Method: Procedures, techniques, algorithms, workflows
+  - Data: Quantitative or structured information (statistics, datasets, measurements)
+  - Artifact: Physical or digital objects created by humans (tools, software, devices)
+  - NaturalObject: Natural non-living objects (minerals, chemical compounds)"""
 
-- Person: Human individuals, real or fictional
-- Creature: Non-human living beings (animals, mythical beings, etc.)
-- Organization: Companies, institutions, government bodies, groups
-- Location: Geographic places (cities, countries, buildings, regions)
-- Event: Occurrences, incidents, ceremonies, meetings
-- Concept: Abstract ideas, theories, principles, beliefs
-- Method: Procedures, techniques, algorithms, workflows
-- Content: Creative or informational works (books, articles, films, reports)
-- Data: Quantitative or structured information (statistics, datasets, measurements)
-- Artifact: Physical or digital objects created by humans (tools, software, devices)
-- NaturalObject: Natural non-living objects (minerals, celestial bodies, chemical compounds)"""
+PROMPTS["entity_types_guidance"] = PROMPTS["default_entity_types_guidance"]
+
 
 # Wrapper block for the optional per-chunk section breadcrumb. The
 # `---Section Context---` heading lives ONLY here so the extraction code never

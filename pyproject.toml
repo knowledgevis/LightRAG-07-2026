@@ -203,3 +203,16 @@ python_functions = ["test_*"]
 
 [tool.ruff]
 target-version = "py310"
+
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+lightrag-hku = { workspace = true, editable = true }
+
+[dependency-groups]
+dev = [
+    "lightrag-hku",
+]
